@@ -1,0 +1,169 @@
+device distributor: Laser
+board manufacturer: Along
+board model: AL-Ax3-K71-RTL8703-V2.0 / 20160128
+oem android settings specs:
+Model number = MID-786
+Processor type = QuadCore-A33 (sun8i) (Allwinner, https://linux-sunxi.org/A33) 
+Android version = 6.0.1
+Android security patch level = July 5, 2016
+Firmware version = v6.0rc7
+Kernel version = 3.4.39 / mid15@MID-Along #12 / Tue Aug 30 10:37:15 CST 2016
+Build number = MID-786.20160830
+Total memory: 0.98 GB
+Total storage: 3.98 GB
+display size: 7 inchs
+display resolution = 1024x600
+display type: TN LCD Capacitive Touchscreen (5-point multi-touch)
+flash memory / storage specs: SanDisk SDTNRGAMA-008G / 8 GB Parallel MLC NAND Flash 
+
+https://linux-sunxi.org/Main_Page
+
+the closest and only Along device specified on linux-sunxi is the https://linux-sunxi.org/AL-AX3-Q8.
+both are boards manufactured by Along but they have several differences for eg our board uses the Realtek RTL8703BS chipset for wireless (bluetooth+wifi) while the AL-AX3-Q8 boards use an esp8089 chip,
+lcd display config differs, touchscreen digitiser traces differ, ect.
+
+first we need to backup the entire flash memory / storage.
+we can use the sunxi-fel tool which creates a dump in FEL mode, which is on a hardware level, or we can use adb on a software level. i will be doing it in fel mode.
+im using a kali linux machine for this, first run 'apt install sunxi-tools'.
+to enter fel mode, power off the device fully (note, holding the power button restarts the tablet it does not shut it down), make sure it is unplugged, then hold volume down,
+hold down power for about 2 seconds, then spam click power a few times, release volume up. now plug it back in and and the 'sudo sunxi-fel version' command should return successfully.
+now we are in fel mode.
+
+in-android 'lsusb': Bus 001 Device 016: ID 1f3a:1007 Allwinner Technology Android
+in-fel 'lsusb': Bus 001 Device 020: ID 1f3a:efe8 Allwinner Technology sunxi SoC OTG connector in FEL/flashing mode
+
+'sudo sunxi-fel version': AWUSBFEX soc=00001667(A33) 00000001 ver=0001 44 08 scratchpad=00007e00 00000000 00000000
+
+FEL mode runs from BootROM, which only has access to cpu sram (a few kilobytes), it does not initialise the storage controllers (emmc, nand, spi nor) or system dram.
+bootrom (boot read-only memory) is a piece of firmware stored in the non-volatile memory directly on the soc that serves as the first code executed by the processor upon being powered on.
+with the sunxi-tools utility, we can communicate to the device while its in fel mode, but since the bootloader has not ran, (since we forced fel mode instead of it running the bootloader)
+no storage controller are initialised so we cannot interface with the storage.
+
+generalised boot sequence:
+step 1 - BootROM / BROM:
+the silicon boot read only memory, hardcoded directly into the processors internal mask rom inside the allwinner A33 chip at silicon manufacturing time, it cannot be modified or updated.
+when power is supplied to the SoC the arm core jumps to address 0xffff0000 (FEL mode: 0xffff0000, eGON.BRM: 0xffff4000) of the internal boot rom (BootROM) and starts executing instructions.
+this is the lowest level firmware on the SoC itself, it initialises tiny internal registers and a small scratchpad of internal SRAM, checks if the FEL pin is low (specific FEL button sequence)
+to enter FEL mode (allwinners usb-based low-level recovery and flashing protocol), if normal boot proceeds it probes the primary external storage media
+(on a android tablet this is typically internal NAND flash or eMMC) by reading the first few sectors looking for a valid allwinner boot signature.
+step 2 - Boot0 (SPL / Second Program Loader):
+since the bootrom only has access to the chips small internal SRAM (which is not big enough to hold a full bootloader), it loads Boot0 (also known as the secondary program loader or SPL).
+Boot0 is stored in the actual flash memory / storage, we are no longer reading from the soc. it lives in the raw sectors at the very beginning of the storage,
+typically starting around offset 8KB / sector 8, before any partition table exists, although this varies.
+Boot0s primary job is to initialise more of the hardware like external system RAM (DDR3/DDRL memory). once external RAM is alive and stable, boot0 has a workspace large enough to hand off
+control to the next stage.
+step 3 - Boot1 (Main Bootloader) + script.bin:
+next we have the bootloader which is the last step in initialising the device in preperation for the kernel + OS.
+it is loaded by Boot0, its stored following Boot0 at the start of device storage, along with a companion configuration file named script.bin.
+the bootloader, this one being propietary by Allwinner, is a fully featured minimal operating system designed for the main hardware initialisations.
+it reads script.bin, which tells the bootloader critical board-specific details for the exact device model (eg, pin multiplexing, voltages, power management IC configurations,
+the exact display timings, ect). it initialises secondary peripherals (storage controllers, USB, display output, ect). it looks at the flash partition table, locates the Android boot partition,
+and copies the linux kernel and its initial ramdisk from flash storage into the system RAM.   
+step++ - Linux Kernel + Android:
+the bootloader loads the linux kernel image alongside a root filesystem ramdisk, then after the kernel initialises it runs /init which starts initialising android, i dont really care about this.
+
+since we need the bootloader to run in order to initialise all the storage stuff needed for us to make a dump, but we dont want to go into the bootloader since that will just load android,
+we need something else to do the storage driver initialisation stuffs for us, that we can also communicate with.
+now the process varies depending on the type of storage, looking at the actual chip and searching it up it is a 8GB Parallel MLC NAND Flash chip by sandisk.
+if the device used eMMC/SPI/SD storage we could load another bootloader like U-Boot in FEL mode with sunxi-tools, but since the device used a parralel nand chip it makes it more complicated.
+with emmc/spi/sd storage we can run a command from uboot which lets us mount the flash storage as a usb drive on our pc, but parralel nand is far more complicated to read from so this wont work.
+loading a minimal linux kernel would bypass these restrictions entirely.
+once the linux kernel boots, it loads the native allwinner NAND controller driver, reads the hardware specific ECC (error correction code) automatically, and allows tools like nanddump to cleanly
+stream a raw image of the flash without fighting uboot configurations plus limitations.
+after doing more reasearch i deem this too complicated, i would need the exact driver for the nand chip and the boards device tree, which at that point we almost have a full linux kernel on it.
+i will just do a system backup with adb.
+trying to run 'adb root' we get "adbd cannot run as root in production builds", so we are running at user space.
+i downloaded kingroot v5.4.0 from https://www.apkmirror.com/apk/kingroot-studio/kingroot/kingroot-5-4-0-release/kingroot-5-4-0-android-apk-download/, ill see if this works.
+i ran 'adb install' with the apk, i ran the kingroot app but it needs internet access, but when i connect to my 2.4ghz home network it is not able to get internet.
+after restarting the tablet it still says no internet secured but my website loads fine, so now kingroot is trying to root the device.
+i could not get it to work, i think its servers are probably down.
+im going to try a different self-compiled exploit to gain root, https://github.com/timwr/cve-2016-5195.git.
+i installed build tools, installed source code, and built with these commands:
+
+sudo apt install -y git build-essential make wget unzip
+cd ~
+wget https://dl.google.com/android/repository/android-ndk-r19c-linux-x86_64.zip
+unzip android-ndk-r19c-linux-x86_64.zip
+export PATH=$PATH:~/android-ndk-r19c
+* cd to project path
+git clone https://github.com/timwr/cve-2016-5195.git
+cd cve-2016-5195
+make root
+
+ok well i just realised this is just a proof of concept for an exploit it does not actually disable SELinux (Security-Enhanced Linux) and does not install the superuser (su) binary.
+instead it leverages run-as, by overwriting /system/bin/run-as via Dirty COW, the exploit tricks the system into letting you execute commands as uid=0 (root) through the run-as interface.
+but we still have to worry about selinux, even if we manage to execute commands as root, if selinux is running in Enforcing mode, its security policies can still block the reading of
+raw parallel NAND block devices with dd.
+bu running 'adb shell getenforce' we can see it returns "Enforcing", so selinux gets in the way here.
+
+if i cannot root it i might just go down the route of just doing everything through an sd card so i dont have to write anything to the nand, i think we can get the device to boot into a 
+custom bootloader then kernel and os all through an sd card.
+but im gonna try some more ways to root the device, if i cant i could try to make my own rooting tool based on the last cve proof of concept.
+
+most steps need an unlocked bootloader, so to do that we go to developer options, make sure both USB Debugging and OEM Unlocking are toggled on,
+then we run 'adb reboot bootloader' which boots us in to fastboot mode
+(Fastboot is a low-level communication protocol (and a command-line tool of the same name, included in Android SDK Platform-Tools) that lets your pc talk directly to the devices
+bootloader over usb, before android even starts. unlike abd which requires the os to be running, fastboot works at a deeper level and can write directly to flash partitions.)
+remember that 'OEM unlocking' in developer options is just a toggle that permits the unlock command to work, it does not actually unlock the bootloader.
+now running 'fastboot devices' it returns "Android Fastboot         Android Fastboot", now we can finally send the unlock command with 'fastboot oem unlock' which returns
+"FAILED (remote: 'system is not locked')  /  fastboot: error: Command failed" , and running 'astboot flashing unlock' just returns "FAILED (remote: '')  /  fastboot: error: Command failed".
+this means the bootloader is not locked in the traditional sense, or the fastboot daemon on this allwinner chip is a minimal stub that doesnt follow googles standard locking mecahnism.
+and anyways sending the unlock command wouldve wiped all user data i think so its good it didnt work.
+
+i could probably push a new firmware image with magisk through fel mode or something but this kind of defeats the purpose of me doing it myself and leaving everything mostly untouched before backup.
+for now i will just try to pull the bootloader (boot1) and the hardware profile (script.bin), having the bootloader will save us incase we fuck it up and we need the hardware info for the kernel.
+unfortunately linux-sunxi.org is down rn returning a 404, but i tried to run these commands in my terminal before so i still have them luckily:
+
+sudo sunxi-fel read 0x42400000 0x82d0 boot1.header
+sudo sunxi-fel read 0x43000000 0x20000 script.bin 
+
+i tried running those 2 commands but the just return "sb_bulk_send() ERROR -7: Operation timed out",
+even after re-entering fel mode and running 'sudo sunxi-fel ver' and having it return successsfully with
+'AWUSBFEX soc=00001667(A33) 00000001 ver=0001 44 08 scratchpad=00007e00 00000000 00000000', the 2 commands above fail.
+im pretty sure i can get the hardware info bin from '/proc/script/dump' in the filesystem from within android but i cant do that for the bootloader.
+it looks like the 2 commands above are reading from raw addresses in storage, but i thought that fel mode does not initialise any storage.
+i will just use u-boot to do all dis.
+first i cloned it onto my machine with 'git clone https://github.com/u-boot/u-boot.git'.
+i know that uboot has native support for the allwinner a33 chip, but im not sure how it will initialise the parallel nand.
+when running in fel mode none of the memory or storage is initialised everything runs on 32KB of on soc sram, which is not enough to store or run u-boot.
+when running the command that injects the spl (secondary program loader) during fel mode, the brom copies the spl onto the sram and executes it.
+the spl contains compiled timing tables and register configurations for the allwinner a33 memory controller (sunxi_dram), it writes directly to the hardware registers to set up clock multipliers,
+voltage references, row/column timings, and refresh rates for the physical ddr3 ram chips soldered to the board.
+once the spl initialises the external dram chips, it unpacks the main uboot binary from the compiled image and copies it into the newly awakened memory, then hands execution control to it.
+its job is to prepare the environment and load the bootloader, but it doesnt initialise any storage.
+unlike standard emmc or sd cards (which use a standardized block-device protocol), allwinners raw parallel nand controller (NFC) relies on proprietary hardware ECC (error correction code) schemes,
+custom page layouts, and hardware data randomizers.
+upstream uboot has mostly focused on emmc/sd booting, native driver support for raw parallel nand flash in mainline uboot and mainline linux is either extremely limited or experimental.
+many devices using parallel nand storage require vendor-modified sdk kernels to read raw nand partitions properly.
+i ran this catch-all install command for any dependencies that might be needed to compile the image,
+'sudo apt install -y build-essential git gcc-arm-linux-gnueabihf swig python3-dev device-tree-compiler libssl-dev bison flex'.
+note, the makefile prohibits spaces from the source directory so i had to rename it with underscores.
+now we cd into the cloned repo and start our compilation.
+running 'ls configs/ | grep -E -i "a33|sun8i"' you can see some of the included configs for our chip:
+A33-OLinuXino_defconfig
+q8_a33_tablet_1024x600_defconfig
+q8_a33_tablet_800x480_defconfig
+Sinlinx_SinA33_defconfig
+sun8i_a23_evb_defconfig
+our device is a tablet running a a33 chip and it has a display resoltuion of 1024x600 so ill pick the corresponding config, 'q8_a33_tablet_1024x600_defconfig'.
+apply this configuration with this command, 'make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- q8_a33_tablet_1024x600_defconfig'.
+and finaly compile source into a binary (with all avaliable cpu cores) we can use with 'make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j$(nproc)'.
+now i got no error so everything looks good.
+the compiled bin will be in the root directory of the u-boot repository, theres a few .bin files but the one we want is "u-boot-sunxi-with-spl.bin". i copied it into our working directory.
+
+now lets inject the binary onto our device.
+first we get it into fel mode ofc, then we run 'sudo sunxi-fel -v uboot u-boot-sunxi-with-spl.bin' which is a special command that loads and executes the spl that executes the bootloader
+all through fel mode, note i added the -v / verbose flag.
+now we see the command print,
+found DT name in SPL header: sun8i-a33-q8-tablet
+Stack pointers: sp_irq=0x00002000, sp=0x00005E08
+MMU is not enabled by BROM
+=> Executing the SPL... done.
+Writing image "U-Boot 2026.10-00908-g903c9578ee", 519072 bytes @ 0x4A000000.
+Starting U-Boot (0x4A000000).
+in the terminal and we see the uboot terminal boot onto the device.
+
+uboot boots successfully but i have no way to communicate or send commands, im pretty sure by default the configuration routes all communication through UART.
+*note, renamed 'u-boot-sunxi-with-spl.bin' to 'default-q8_a33_defconfig-u-boot-sunxi-with-spl.bin' and added to this dir.
+the uboot 'q8_a33_tablet_1024x600_defconfig' config 
+no usb driver ? ? ? another driver needed to power usb ? ? ? 
