@@ -121,7 +121,9 @@ i tried running those 2 commands but the just return "sb_bulk_send() ERROR -7: O
 even after re-entering fel mode and running 'sudo sunxi-fel ver' and having it return successsfully with
 'AWUSBFEX soc=00001667(A33) 00000001 ver=0001 44 08 scratchpad=00007e00 00000000 00000000', the 2 commands above fail.
 im pretty sure i can get the hardware info bin from '/proc/script/dump' in the filesystem from within android but i cant do that for the bootloader.
-it looks like the 2 commands above are reading from raw addresses in storage, but i thought that fel mode does not initialise any storage.
+it looks like the 2 commands above are reading from raw memory addresses in the extrnal ram / dram, not on-soc sram.
+but in fel mode, only the on-soc sram is initialised so the dram cannot be accessed?
+i read that there is a way to enter fel mode from the stock bootloader using a uart shell, but i dont know if this is true, linux-sunxi.org is down so i cant read the guide anymore.
 i will just use u-boot to do all dis.
 first i cloned it onto my machine with 'git clone https://github.com/u-boot/u-boot.git'.
 i know that uboot has native support for the allwinner a33 chip, but im not sure how it will initialise the parallel nand.
@@ -165,5 +167,47 @@ in the terminal and we see the uboot terminal boot onto the device.
 
 uboot boots successfully but i have no way to communicate or send commands, im pretty sure by default the configuration routes all communication through UART.
 *note, renamed 'u-boot-sunxi-with-spl.bin' to 'default-q8_a33_defconfig-u-boot-sunxi-with-spl.bin' and added to this dir.
-the uboot 'q8_a33_tablet_1024x600_defconfig' config 
-no usb driver ? ? ? another driver needed to power usb ? ? ? 
+the uboot 'q8_a33_tablet_1024x600_defconfig' config routes all communications through uart, (CONFIG_CONS_INDEX=5) not usb.
+i dont know if it even has the drivers to use it, idk much about this.
+and in the config file the usb port is set up as a usb host not a usb gadget/peripheral, (CONFIG_USB_MUSB_HOST=y).
+curretly its in host mode, so it will attempt to provide power to the connected device, so presumably something like a keyboard should work, but it doesnt.
+but what shows on the uboot console is:
+
+starting USB...
+No host cable detected: Bus usb@1c19000: Port not avaliable.
+No USB controllers found
+		scanning usb for storage devices... 0 Storage Device(s) found
+Hit any key to stop autoboot: 1
+
+the usb (micro-usb) port on mobile devices is a OTG (on-the-go) port.
+meaning it switches role depending on if the otg ID pin is floating (unconnected) or grounded.
+if the pin is grounded the MUSB controller instructs the port to work in host mode, it supplies power to peripheral connected to it like a mouse, keyboard, usb drive, ect.
+if the pin is floating, ungrounded, the port works in device/peripheral mode, now the usb port acts as a peripheral so it can be connected to and used by other devices like a computer.
+this is why uboot says "No host cable detected".
+even if you connected an otg adapter which could force the device into being the host, i think uboot would still say "No USB controllers found".
+when the tablet boots normally, the bootloader talks to the AXP223 power management IC (PMIC) to power up the internal clocks, voltage regulators (like reg_dldo1), and the usb physical layer (PHY).
+when booting via sunxi-fel uboot, it only loads the bare minimum code and drivers needed to wake up the dram. The usb controller hardware and its power rails remain uninitialized and unpowered.
+when uboot's usb initialization routine runs, it scans the memory map for active usb controllers, it finds nothing responding (because they have no power or clock signal),
+so it aborts with "No usb controllers found".
+not only that the port is stuck in device mode, but the port itself is unusable since the usb controller hardware lacks power and clock initialization since the pmic sequence was not executed.
+
+^ info:
+https://github.com/u-boot/u-boot/blob/903c9578eeb36d72f087082da494c605ddaed3b2/configs/q8_a33_tablet_1024x600_defconfig
+https://github.com/search?q=repo%3Au-boot%2Fu-boot+sun8i-a33-q8-tablet&type=code
+https://github.com/search?q=repo%3Au-boot%2Fu-boot+sun8i-a33.dtsi&type=code
+https://github.com/search?q=repo%3Au-boot%2Fu-boot+sun8i-q8-common.dtsi&type=code
+
+i dont think theres anything i can do in the config to fix this, i would need to get the script.bin to have any glimmer of hope but i dont and even if i did i doubt i could do anything useful.
+well i might have to give up on using the built in storage and just use an sd card.
+then i could just boot into the sd card from fel mode completely bypassing the oem spl, bootloader, kernel, and android.
+also, the script.bin file is not really needed for us.
+the script.bin file is a proprietary binary blob compiled from a text-based .fex configuration file developed by allwinner for their vendor-specific linux kernel fork.
+their propietary kernel cannot dynamically detect hardware so they developed this mechanism to be loaded into memory by the oem bootloader to pass all the hardware specific information / board
+topology into the kernel at boot, stuff like clock speeds, regulator voltages, memory maps, screen resoltution, gpio pin-outs for stuff like the screen, touch controller, ect.
+they did this because the mainline linux kernel requires developers to write standard, upstream-compliant Device Tree Source (.dts) files,
+which get compiled into .dtb files by the Device Tree Compiler (dtc). we say this same format used in u-boot previously, since its based on linux.
+it serves the exact same purpose as script.bin, describing board topology / hardware specific information.
+however the device tree is an open, industry-standard architecture used across almost all modern arm hardware rather than being locked to allwinners proprietary format.
+so we can simply use the .dts file from uboot, (https://github.com/u-boot/u-boot/blob/903c9578eeb36d72f087082da494c605ddaed3b2/configs/q8_a33_tablet_1024x600_defconfig).
+
+boot off sd card now, heh...
