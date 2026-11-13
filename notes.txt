@@ -173,13 +173,37 @@ and in the config file the usb port is set up as a usb host not a usb gadget/per
 curretly its in host mode, so it will attempt to provide power to the connected device, so presumably something like a keyboard should work, but it doesnt.
 but what shows on the uboot console is:
 
+U-Boot 2026.10-00908-g903c9578eeb3 (Oct 22 2026 - 12:35:32 +0000) Allwinner Technology
+
+CPU: Allwinner A33 (SUN8I 1667)
+Model: Q8 A33 Tablet
+DRAM: 1 Gib
+Core: 68 devices, 21 uclasses, devicetree: seperate
+WDT: Not starting watchdog@1c20ca0
+MMC: mmc@1c0f000: 0,mmc@1c10000: 1
+Unable to read "uboot.env" from mmc0:1...
+Setting up a 1024x600 lcd console (coverscan 0x0)
+In: serial,usbkbd
+Out: serial,vidconsole
+Err: serial,vidconsole
+Net: No ethernet found.
+
 starting USB...
 No host cable detected: Bus usb@1c19000: Port not avaliable.
 No USB controllers found
 		scanning usb for storage devices... 0 Storage Device(s) found
-Hit any key to stop autoboot: 1
+Hit any key to stop autoboot: 0
+switch to partitions #0, OK
+mmc0 is current device
+Scanning mmc 0:1...
+Card did not respond to voltage select! : -110
+Cannot persist EFI variables without system partition
+Loading Boot0000 'mmc 0' failed
+EFI boot manager: Cannot load any image
 
-the usb (micro-usb) port on mobile devices is a OTG (on-the-go) port.
+ect, ect, ect just bs about no device no config no ethernet no anything ect ect ect
+
+the usb (micro-usb) port on mobile devices is an OTG (on-the-go) port.
 meaning it switches role depending on if the otg ID pin is floating (unconnected) or grounded.
 if the pin is grounded the MUSB controller instructs the port to work in host mode, it supplies power to peripheral connected to it like a mouse, keyboard, usb drive, ect.
 if the pin is floating, ungrounded, the port works in device/peripheral mode, now the usb port acts as a peripheral so it can be connected to and used by other devices like a computer.
@@ -210,4 +234,62 @@ it serves the exact same purpose as script.bin, describing board topology / hard
 however the device tree is an open, industry-standard architecture used across almost all modern arm hardware rather than being locked to allwinners proprietary format.
 so we can simply use the .dts file from uboot, (https://github.com/u-boot/u-boot/blob/903c9578eeb36d72f087082da494c605ddaed3b2/configs/q8_a33_tablet_1024x600_defconfig).
 
-boot off sd card now, heh...
+boot off sd card now, coming back after break + linux-sunxi.org is dead.
+note i did some of this like a month ago but i never wrote it down.
+we already have the compiled uboot binary, so we just need to create a bootable image on the sdcard with it.
+after inserting an sd card into my computer, or in my case a usb sd card reader, we need to get the device identifier (block device).
+running 'lsblk' we get a list of block devices,
+
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+loop0    7:0    0   3.9G  1 loop /run/live/rootfs/filesystem.squashfs
+sda      8:0    1     0B  0 disk 
+sdb      8:16   1 114.6G  0 disk 
+├─sdb1   8:17   1   5.6G  0 part /run/live/medium
+└─sdb2   8:18   1   109G  0 part /run/live/persistence/sdb2
+sdc      8:32   1  29.7G  0 disk 
+└─sdc1   8:33   1  29.7G  0 part 
+
+we can see the sd card sdc, sdc1 is its partition, but we just need the name of the device / disk. 
+now we can write the raw binary we have onto the sd cards corresponding block device, we can do this with the 'dd' command.
+the 'dd' command is a low-level utility used to copy, convert, and manipulate data at the byte level, unlike standard file copy tools, it operates on block devices,
+making it essential for disk cloning, creating disk images, writing ISO files to USB drives, and backing up partitions or the Master Boot Record (MBR).
+we run this basic template 'sudo dd if=<ourbinary.bin> of=/dev/<sdX> bs=1k seek=8 conv=fsync,notrunc',
+as 'sudo dd if=default-q8_a33_defconfig-u-boot-sunxi-with-spl.bin of=/dev/sdc bs=1k seek=8 conv=fsync,notrunc'.
+we add out binary to the 'if' paramater and the sd cards block device name to 'of=/dev/', we use 'seek=8' because allwinners BROM is programmed to read 32kb of data starting precisely at
+the 8kb offset (sector 16) of the external MMC0 slot, so setting 'seek' to 8 places our binary exactly where it will be read.
+running the command gives us this back, meaning it ran successfully.
+538+1 records in
+538+1 records out
+551904 bytes (552 kB, 539 KiB) copied, 0.0670887 s, 8.2 MB/s
+since the allwinner boot rom (brom) always scans the external microsd card (for a valid boot signature at 8kb into storage) before the internal storage,
+its as easy as just turning the device on and the brom will boot into our binary.
+( BROM (hardcoded to soc, enters fel mode or looks for valid valid boot signiture to continue boot process) ->  ANY/SPL (first writable stage, anything can go here, but its used to initialise
+basic hardware, prepare, and load the next stage, by default this is boot0, u-boot has its own spl which does the same thing) -> Main Bootloader (the spl executes the main bootloader which
+will initialise and start the linux kernel for example, by default it is boot1, for us its u-boot)  | soc(brom ->) uboot(spl -> uboot ->) hmm(kernel, bare metal?),
+uboot is commonly used to refer to the main uboot bootloader but since we use the compiled u-boot-sunxi-with-spl.bin binary, it also compiles its own spl. )
+
+okay, now when turning the device on with the sd card inside it boots into uboot and we get the same initial stuff as before, but now our usb port actually works.
+everything is the same but now we get:
+
+starting USB...
+Allwinner mUSB OTG (Host)
+Bus usb@1c19000: 1 USB Device(s) found
+		scanning usb for storage devices... 0 Storage Device(s) found
+ect...
+
+i am actually able to interface with it using my micro-usb to usb-a otg adapter and keyboard, im able to type commands and whatnot.
+i dont want to go into the specifics of it right now, but what this means it that the uboot environment successfully initialised the MUSB host controller and powered the VBUS/PHY rails,
+so usb should fully work.
+
+im gonna try to boot the mainline linux kernel from uboot, i checked and the uboot and linux source code contains the same sun8i-a33-q8-tablet.dts device tree source.
+to do this we need to format and partition the sd card, get and compile the linux kernel and its device tree binary,  download a root filesystem (rootfs), write it all, then it should work.
+
+fetch linux kernel:
+git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+cd linux
+configure the kernel for sunxi ARM:
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- sunxi_defconfig
+compile the kernel, modules, and device trees:
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j$(nproc) zImage modules dtbs
+
+after building, the kernel zimage is in 'arch/arm/boot/zImage', and the device tree binary dtb is in 'arch/arm/boot/dts/allwinner/sun8i-a33-q8-tablet.dtb'.
