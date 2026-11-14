@@ -293,3 +293,21 @@ compile the kernel, modules, and device trees:
 make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j$(nproc) zImage modules dtbs
 
 after building, the kernel zimage is in 'arch/arm/boot/zImage', and the device tree binary dtb is in 'arch/arm/boot/dts/allwinner/sun8i-a33-q8-tablet.dtb'.
+
+- Kernel (zImage) + Device Tree (sun8i-a33-q8-tablet.dtb):
+U-Boot loads both raw files from the SD card into DRAM, then jumps to the kernel and hands it the memory address of the .dtb plus a command-line string (bootargs).
+Think of zImage as the CPU/scheduler/drivers code, and .dtb as the wiring diagram telling those drivers which GPIO pins, clocks, and memory addresses exist on the A33 Q8 board.
+- Kernel Modules (/lib/modules/<kernel-release>/)
+sunxi_defconfig compiles core drivers (SD controller, basic console, ext4, core USB/input, etc.) directly into zImage (=y), while many optional drivers (Wi-Fi chips, extra USB adapters, extra filesystems, etc.)
+are compiled as loadable .ko files (=m).
+Once the root filesystem is mounted, udev asks modprobe to load those .ko files from /lib/modules/, although these .ko drives are not compiled into the kernel zImage so we have to run commands
+to add them to our rootfs later on.
+- Root Filesystem (rootfs):
+A kernel alone has no ls, sh, login, or user programs. Once the kernel initializes hardware and mounts the root partition via the Virtual File System (VFS),
+it looks for one program to start as PID 1 (by default /sbin/init).
+PID 1 mounts virtual filesystems (/proc for process/kernel info, /sys for hardware/driver sysfs, /dev for device nodes), runs startup scripts/services, and spawns getty + login on your
+console so you get a shell prompt.
+
+it took me about a day and a half of work but i got linux running on the tablet, although there are still some things i have to fix, i went back and fourth with AI a lot so im going to feed
+it all the commands and snippets from my kali machine for it to create a basic guide / step by step of what i did.
+
