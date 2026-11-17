@@ -106,57 +106,66 @@ index 2db3be3bb689..8f49d561c92e 100644
 
 ---
 
-## 3. USB OTG Cold-Boot Handover Fix (`usb stop` Workaround vs. Permanent Kernel Driver Patch)
+## 3. USB OTG Cold-Boot Handover Fix (`usb stop` Workaround + Permanent Linux & U-Boot Fixes)
 
 ### Root Cause of the U-Boot -> Linux MUSB Handover Bug
 When a USB OTG keyboard is plugged in **at cold power-on**:
 1. U-Boot initializes `usb@1c19000` (`Allwinner mUSB OTG (Host)`) and enumerates the low-speed USB keyboard (`1 USB Device(s) found`).
-2. U-Boot's `bootz` command does **not** invoke `.remove()` on the MUSB driver unless `CONFIG_DM_DEVICE_REMOVE` + `DM_FLAG_ACTIVE_DMA` / `DM_FLAG_OS_PREPARE` is set on the `musb-new` U-Boot driver (or `usb stop` is run explicitly).
-3. When Linux boots and probes `drivers/phy/allwinner/phy-sun4i-usb.c` (`sun4i_usb_phy_init`) and `drivers/usb/musb/sunxi.c` (`sunxi_musb_init`), both drivers only call:
+2. When `bootz` jumps to Linux without stopping USB first, U-Boot leaves the MUSB controller and PHY active (with `RST_BUS_OTG` and `RST_USB_PHY0` already deasserted and VBUS/register state live).
+3. When Linux boots and initializes `drivers/usb/musb/sunxi.c` (`sunxi_musb_init`) and `drivers/phy/allwinner/phy-sun4i-usb.c` (`sun4i_usb_phy_init`), both drivers only call:
    ```c
    reset_control_deassert(...);
    ```
    Because U-Boot *already* deasserted `RST_USB_PHY0` and `RST_BUS_OTG`, calling `reset_control_deassert()` in Linux does **not** pulse the hardware reset lines!
 4. As a result, the Allwinner MUSB IP block retains stale register state from U-Boot right through `sunxi_musb_enable()`:
-   - **Broken Cold-Boot Register State (without reset / `usb stop`):**
-     - `Power  : f0` (`MUSB_POWER_ISOUPDATE | MUSB_POWER_SOFTCONN | MUSB_POWER_HSENAB | MUSB_POWER_HSMODE` — stuck in High-Speed mode `0x10` even though a Low-Speed keyboard is attached!)
+   - **Broken Cold-Boot Register State (without `usb stop` / hardware reset):**
+     - `Power  : f0` (`MUSB_POWER_ISOUPDATE | MUSB_POWER_SOFTCONN | MUSB_POWER_HSENAB | MUSB_POWER_HSMODE` — `0x10` `HSMODE` stuck on even with a Low-Speed keyboard attached!)
      - `DevCtl : 99` (`MUSB_DEVCTL_BDEVICE | MUSB_DEVCTL_VBUS | MUSB_DEVCTL_SESSION` — `BDEVICE` bit `0x80` set, `HM` Host Mode bit `0x04` cleared, `LSDEV` bit `0x20` cleared!)
      - `Frame  : 00ea` (frozen frame counter from U-Boot)
-   - **Clean Register State (with `usb stop` or hardware reset pulse):**
+   - **Clean Register State (with `usb stop`):**
      - `Power  : e0` (`MUSB_POWER_ISOUPDATE | MUSB_POWER_SOFTCONN | MUSB_POWER_HSENAB`)
-     - `DevCtl : 3d` (`MUSB_DEVCTL_LSDEV | MUSB_DEVCTL_VBUS | MUSB_DEVCTL_HM | MUSB_DEVCTL_SESSION` — `HM` Host Mode active, Low-Speed device detected, `Frame` incrementing)
+     - `DevCtl : 3d` (`MUSB_DEVCTL_LSDEV | MUSB_DEVCTL_VBUS | MUSB_DEVCTL_HM | MUSB_DEVCTL_SESSION` — `HM` Host Mode active, Low-Speed device detected, `Frame` advancing)
 
-### Current Bootloader Fix (Applied in `boot.cmd` -> `boot.scr`)
-Adding `usb stop` as the first line of `boot.cmd` cleanly stops U-Boot's MUSB host controller before `bootz` executes.
+### Current Configuration Fix (Applied in `boot.cmd` -> `boot.scr`)
+Adding `usb stop` as the first line of `boot.cmd` cleanly stops U-Boot's MUSB host controller before `bootz` executes, allowing an **unmodified** U-Boot + Linux USB driver pair to work reliably.
 
-### Permanent C Driver Patch for Our Future Linux Kernel Fork
-When we fork Linux so the kernel is completely self-healing regardless of bootloader state (even if someone boots without `usb stop` in `boot.scr`), we can pulse the hardware reset control in `drivers/usb/musb/sunxi.c` (`sunxi_musb_init`) and `drivers/phy/allwinner/phy-sun4i-usb.c` (`sun4i_usb_phy_init`):
+---
 
-```diff
---- a/drivers/usb/musb/sunxi.c
-+++ b/drivers/usb/musb/sunxi.c
-@@ -625,6 +625,8 @@ static int sunxi_musb_init(struct musb *musb)
- 		return ret;
- 
- 	if (test_bit(SUNXI_MUSB_FL_HAS_RESET, &glue->flags)) {
+### Option A: Permanent C Driver Patch for Our Future Linux Kernel Fork
+So Linux is completely self-healing regardless of bootloader state (even if someone boots via manual `bootz` or an older `boot.scr` without `usb stop`), pulse hardware reset before deasserting it in `drivers/usb/musb/sunxi.c` (`sunxi_musb_init`) and `drivers/phy/allwinner/phy-sun4i-usb.c` (`sun4i_usb_phy_init`).
+
+In `drivers/usb/musb/sunxi.c`, inside `sunxi_musb_init()` *(verified around line 226 in our `7.4.0-rc2` tree; confirm `<linux/delay.h>` is included before using `usleep_range`)*:
+```c
+	if (test_bit(SUNXI_MUSB_FL_HAS_RESET, &glue->flags)) {
 +		reset_control_assert(glue->rst);
 +		usleep_range(10, 20);
- 		ret = reset_control_deassert(glue->rst);
- 		if (ret)
- 			goto error_clk_disable;
+		ret = reset_control_deassert(glue->rst);
+		if (ret)
+			goto error_clk_disable;
+	}
 ```
-And similarly in `drivers/phy/allwinner/phy-sun4i-usb.c` inside `sun4i_usb_phy_init()`:
-```diff
---- a/drivers/phy/allwinner/phy-sun4i-usb.c
-+++ b/drivers/phy/allwinner/phy-sun4i-usb.c
-@@ -286,6 +286,8 @@ static int sun4i_usb_phy_init(struct phy *_phy)
- 		return ret;
- 	}
- 
+And in `drivers/phy/allwinner/phy-sun4i-usb.c`, inside `sun4i_usb_phy_init()` *(verified around line 274; `<linux/delay.h>` is already included)*:
+```c
 +	reset_control_assert(phy->reset);
 +	usleep_range(10, 20);
- 	ret = reset_control_deassert(phy->reset);
- 	if (ret) {
- 		clk_disable_unprepare(phy->clk);
+	ret = reset_control_deassert(phy->reset);
+	if (ret) {
+		clk_disable_unprepare(phy->clk2);
+		clk_disable_unprepare(phy->clk);
+		return ret;
+	}
 ```
 Pulsing `reset_control_assert()` followed by `reset_control_deassert()` forces the Allwinner CCU to hardware-reset the MUSB controller and USB PHY registers back to their power-on defaults before Linux configures them.
+
+---
+
+### Option B: Permanent Bootloader Fix for Our Future U-Boot Fork
+Even though Linux should harden its own driver init (Option A), a well-behaved bootloader should not leave USB host controllers actively running across `bootz` when handing hardware over to an OS. When we fork `u-boot/u-boot` (since we have not inspected U-Boot's C source files yet in this session—only built `q8_a33_tablet_1024x600_defconfig` with `CONFIG_USB_MUSB_HOST=y` and verified that running U-Boot's `usb stop` command before `bootz` fixes the handover), we should inspect and fix two things in U-Boot:
+
+1. **Automatic Pre-OS USB Shutdown on `bootz`:**
+   - Inspect U-Boot's pre-OS device teardown / `bootz` cleanup path so U-Boot automatically executes the equivalent of `usb stop` (`usb_kbd` + active USB host teardown) right before jumping to the Linux kernel image, removing the dependency on every `boot.scr` manually starting with `usb stop`.
+2. **Allwinner MUSB Teardown / Reset (`sunxi` MUSB driver):**
+   - Inspect U-Boot's sunxi MUSB glue driver (enabled by `CONFIG_USB_MUSB_HOST=y` for `usb@1c19000`) and its removal/stop hooks to verify that stopping USB cleanly tears down active MUSB session/interrupt state, clears `DevCtl` / `Power`, disables clocks or re-asserts reset, and leaves the controller in a clean idle state before Linux starts.
+
+> [!NOTE]
+> **Design Rule for Our Forks:** Implementing **both** Option B (U-Boot stops USB cleanly on OS handoff) and Option A (Linux asserts+deasserts `RST_BUS_OTG` and `RST_USB_PHY0` during init) is best practice: U-Boot stops leaving dirty hardware behind for other payloads, and Linux remains immune to any unpatched bootloader.

@@ -324,9 +324,11 @@ sudo make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- INSTALL_MOD_PATH=/mnt/sd_c
 When a Micro-USB OTG adapter and USB keyboard are plugged in when you press Power, **U-Boot** initializes the Allwinner MUSB controller (`usb@1c19000`) in Host mode and enumerates the keyboard so you can type in the U-Boot shell.
 
 However, when U-Boot jumps to Linux via `bootz` without stopping USB first:
-- Mainline Linux's `sunxi_musb_init()` (`drivers/usb/musb/sunxi.c`) and `sun4i_usb_phy_init()` (`drivers/phy/allwinner/phy-sun4i-usb.c`) only call `reset_control_deassert()`—Wait/deassert is a no-op if U-Boot already deasserted the reset line!
+- Mainline Linux's `sunxi_musb_init()` (`drivers/usb/musb/sunxi.c`) and `sun4i_usb_phy_init()` (`drivers/phy/allwinner/phy-sun4i-usb.c`) only call `reset_control_deassert()`—which is a no-op if U-Boot already deasserted the reset line!
 - Because the MUSB controller is never reset during the handoff, its registers remain polluted (`DevCtl: 0x99` = `BDEVICE | VBUS | SESSION`, `Power: 0xf0` = `HSMODE` stuck set, `Frame: 0x00ea` frozen), leaving Linux MUSB stuck in `a_wait_bcon` and ignoring the plugged-in keyboard.
 - Running **`usb stop`** at the top of `boot.cmd` cleanly shuts down U-Boot's USB host stack before `bootz` runs, allowing Linux to bring up MUSB cleanly (`DevCtl: 0x3d` = `LSDEV | VBUS | HM | SESSION`, `Power: 0xe0`) whether the keyboard was plugged in before power-on or hot-plugged later.
+
+When using the modified Linux kernel and or U-Boot you do not need to include `usb stop`.
 
 ### 7.2 What Each Line of `boot.cmd` Does
 - `usb stop`: Tears down U-Boot's active MUSB host session before handing hardware control to Linux.
@@ -411,4 +413,71 @@ sudo mount -o ro /dev/sdc2 /mnt/sd_card_root
 sudo journalctl -D /mnt/sd_card_root/var/log/journal -b -0 -k --no-pager
 sudo umount /mnt/sd_card_root
 ```
-*(Or, for early one-shot hardware register dumps, a systemd service in `/etc/systemd/system/usb-debug.service` linked into `/etc/systemd/system/sysinit.target.wants/` can dump `/sys/kernel/debug/musb-hdrc.2.auto/regdump` and `dmesg` directly to `/boot/usb_debug.txt` on the FAT32 partition.)*
+
+### 9.5 Example Early Hardware Debug Script & `systemd` Oneshot Service
+Because we could not type on the tablet before USB OTG worked (and had no serial UART), we created a temporary `systemd` oneshot service to capture live `sysfs`/`debugfs` hardware state (`power_supply`, USB devices, MUSB `mode`/`vbus`, `extcon`, `/sys/kernel/debug/usb/musb*/regdump`, and `dmesg`) directly into `/boot/usb_debug.txt` on the FAT32 partition so we could inspect it offline from Kali.
+
+#### 1. Create the Debug Snapshot Script (`/usr/local/sbin/usb-debug.sh`) on Partition 2 (`sdc2`)
+```sh
+#!/bin/sh
+exec > /boot/usb_debug.txt 2>&1
+echo ===EARLY===
+grep "" /sys/class/power_supply/*/uevent
+ls /sys/bus/usb/devices
+grep "" /sys/bus/platform/devices/musb*/mode
+grep "" /sys/bus/platform/devices/musb*/vbus
+grep "" /sys/class/extcon/*/state
+ls /sys/kernel/debug /sys/kernel/debug/usb
+cat /sys/kernel/debug/usb/musb*/regdump
+dmesg | grep -iE "usb|musb|phy|axp|vbus|hid"
+sync
+echo EARLY_SAVED > /dev/tty1
+sleep 20
+echo ===20S===
+ls /sys/bus/usb/devices
+grep "" /sys/bus/platform/devices/musb*/mode
+grep "" /sys/bus/platform/devices/musb*/vbus
+cat /sys/kernel/debug/usb/musb*/regdump
+dmesg | tail -n 20
+sync
+echo 20S_SAVED > /dev/tty1
+```
+Make it executable (and strip any stray Windows `\r` line endings if pasted):
+```bash
+sudo sed -i 's/\r$//' /mnt/sd_card_root/usr/local/sbin/usb-debug.sh
+sudo chmod +x /mnt/sd_card_root/usr/local/sbin/usb-debug.sh
+```
+
+#### 2. Create & Enable the `systemd` Oneshot Unit (`/etc/systemd/system/usb-debug.service`)
+```ini
+[Unit]
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/usb-debug.sh
+
+[Install]
+WantedBy=multi-user.target
+```
+Because we were editing an unbooted rootfs offline from Kali rather than running `systemctl enable` on the live tablet, we created the `multi-user.target.wants` symlink manually:
+```bash
+sudo sed -i 's/\r$//' /mnt/sd_card_root/etc/systemd/system/usb-debug.service
+sudo mkdir -p /mnt/sd_card_root/etc/systemd/system/multi-user.target.wants
+sudo ln -sf /etc/systemd/system/usb-debug.service /mnt/sd_card_root/etc/systemd/system/multi-user.target.wants/usb-debug.service
+sync && sudo umount /mnt/sd_card_root
+```
+After booting the tablet and waiting for `20S_SAVED` on `tty1`, we mounted `/dev/sdc1` read-only on Kali (`sudo mount -o ro /dev/sdc1 /mnt/sd_boot`) and read `/mnt/sd_boot/usb_debug.txt`.
+
+> [!NOTE]
+> Reading `/sys/kernel/debug/usb/musb*/regdump` probes standard MUSB register offsets that Allwinner's stripped-down MUSB core does not implement, causing harmless `musb-sunxi: Error unknown readw/readb offset ...` lines in `dmesg` / `tty1`.
+
+#### 3. Cleaning Up the Temporary Debug Service Once Fixed
+Once keyboard login works, run these on the tablet as `root` to remove the debug service and silence those `regdump` probe messages:
+```bash
+systemctl disable usb-debug.service
+rm /etc/systemd/system/usb-debug.service
+rm /usr/local/sbin/usb-debug.sh
+rm /boot/usb_debug.txt
+systemctl daemon-reload
+```
