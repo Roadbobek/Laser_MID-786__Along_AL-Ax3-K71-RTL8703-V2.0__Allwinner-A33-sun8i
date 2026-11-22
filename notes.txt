@@ -318,3 +318,36 @@ Linux:
 U-Boot:
 	commit 903c9578eeb36d72f087082da494c605ddaed3b2
 	Date:   Sat Aug 22 23:55:40 2026 +0300
+
+okay im forking the linux kernel so i can implement my own device tree and the usb driver patches, although the ai did that all for me unfoertunately, but i will do the u-boot patches on my own hopefully,
+anyways it took a very long time so i deserve a break.
+
+for the first fix, the simplest one, uboot can leave the usb ports, usb phy / usb musb, in a stale state by not asserting the reset lines before booting kernel.
+so i added an assert plus a short delay before the pre-existing deassertions inside the phy (drivers/phy/allwinner/phy-sun4i-usb.c) and musb (drivers/usb/musb/sunxi.c) drivers.
+but there is an interesting hardware quirck with some allwinner socs, with socs with the .needs_phy2_siddq flag, they need phy2 to be up and deasserted with SIDDQ cleared for the other phy interfaces
+to work. so on these chips, our assertion within 'phy / phy-sun4i-usb.c : sun4i_usb_phy_init' would run on phy2 and since the other phy interfaces rely on its circuitry, for the wait between the
+assert and deassert and until SIDDQ is cleared, the other phy interfaces would go down, which could cause serious issues, and if the deassert on phy2 fails for eg the other ports can all stop working
+completely. even during a normal boot the usb controllers do not all run sun4i_usb_phy_init at the exact same instant, they probe one after another (or asynchronously in arbitrary order),
+so phy0, phy2, or phy3 can already be active and enumerating devices when ehci2/ohci2 initializes phy2 milliseconds later,
+and manual module loading/unloading or driver rebinding can also trigger this any time after boot.
+
+initial usb musb patch commit:
+https://github.com/Roadbobek/linux__Laser_MID-786__Along_AL-Ax3-K71-RTL8703-V2.0__Allwinner-A33-sun8i/commit/08fa00c8b89a18709d1625c50e3c1f0a5812a8c7
+initial usb phy patch commit:
+https://github.com/Roadbobek/linux__Laser_MID-786__Along_AL-Ax3-K71-RTL8703-V2.0__Allwinner-A33-sun8i/commit/48d7f03fd0fab91337cf256f95f2f1958aca5c01
+
+the simplest semi-fix for this is to only assert, wait and deassert each phy interface within sun4i_usb_phy_init when the needs_phy2_siddq flag is false, and if its true, we simply only
+assert, wait then deassert on every phy interface except phy2. this patch fixes phy2 interrupting the other interfaces but it leaves itself without an assertion.
+so if the bootloader left phy2 dirty / in a stale state phy2 would continue to keep the other phy interfaces working but it itself would not function.
+now while this might be rare, only effecting socs with the needs_phy2_siddq flag true (which is just the sun50i h616) with the combined bootloader / sub-linux issue.
+but this is a pretty common soc, its even used in linux oriented devices like the orange pi zero 2, so with so many different variables and conditions this issue needs to be fixed.
+
+to really fix this issue we need to assert each phy within sun4i_usb_phy_probe, this runs once when the phy driver loads, before any usb controller has called phy_init().
+we add our code after most of the initial setup which happens above and within a loop over each phy, that loop gives us data->num_phys which we loop over ourselves.
+within it we get a reference to each phy, make sure it exists, assert the reset on it and handle errors.
+placing our code here also lets us run before sun4i_usb_phy_probe registers the IRQs and vbus_power_nb, any error handling after that setup requires you to call sun4i_usb_phy_remove
+to clean up IRQs/notifiers before returning ret, but in this spot we can just print the error and return easily.
+
+i also replaced the devm_reset_control_get() calls with devm_reset_control_get_exclusive() in both the phy and musb drivers to make it clear the driver requires exclusive access to assert the resets.
+
+fix clock reference imbalance . . .
