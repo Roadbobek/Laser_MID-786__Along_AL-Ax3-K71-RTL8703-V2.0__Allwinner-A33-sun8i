@@ -527,3 +527,15 @@ Bobek Brzeczyszczykiewicz (3):
  2 files changed, 25 insertions(+), 3 deletions(-)
 ---
 
+fixed another bug, last requested bug from maintainers.
+As reported by Philipp Zabel on v1 [1], should the return value of
+reset_control_assert(glue->rst) be checked and jump to error_clk_disable
+on failure, matching reset_control_deassert() right below?
+
+fixed unchecked reset_control_assert() in musb driver sunxi_musb_init().
+added error handling to reset_control_assert(glue->rst); within sunxi_musb_init(),
+now we jump to error_clk_disable on ret to match reset_control_deassert().
+commit: 
+
+new pr:
+
