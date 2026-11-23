@@ -330,7 +330,6 @@ assert and deassert and until SIDDQ is cleared, the other phy interfaces would g
 completely. even during a normal boot the usb controllers do not all run sun4i_usb_phy_init at the exact same instant, they probe one after another (or asynchronously in arbitrary order),
 so phy0, phy2, or phy3 can already be active and enumerating devices when ehci2/ohci2 initializes phy2 milliseconds later,
 and manual module loading/unloading or driver rebinding can also trigger this any time after boot.
-
 initial usb musb patch commit:
 https://github.com/Roadbobek/linux__Laser_MID-786__Along_AL-Ax3-K71-RTL8703-V2.0__Allwinner-A33-sun8i/commit/08fa00c8b89a18709d1625c50e3c1f0a5812a8c7
 initial usb phy patch commit:
@@ -347,7 +346,144 @@ we add our code after most of the initial setup which happens above and within a
 within it we get a reference to each phy, make sure it exists, assert the reset on it and handle errors.
 placing our code here also lets us run before sun4i_usb_phy_probe registers the IRQs and vbus_power_nb, any error handling after that setup requires you to call sun4i_usb_phy_remove
 to clean up IRQs/notifiers before returning ret, but in this spot we can just print the error and return easily.
+commit: https://github.com/Roadbobek/linux__Laser_MID-786__Along_AL-Ax3-K71-RTL8703-V2.0__Allwinner-A33-sun8i/commit/5f48679bfcfa0ed5eb90c5c525af85429372c3a4
 
 i also replaced the devm_reset_control_get() calls with devm_reset_control_get_exclusive() in both the phy and musb drivers to make it clear the driver requires exclusive access to assert the resets.
+commit: https://github.com/Roadbobek/linux__Laser_MID-786__Along_AL-Ax3-K71-RTL8703-V2.0__Allwinner-A33-sun8i/commit/d84ec9cc4fb429948b07afcf435ffe24b3cba276
 
-fix clock reference imbalance . . .
+also fixed clock reference imbalance within phy driver : sun4i_usb_phy_init() for SoCs with needs_phy2_siddq flag, for such chips phy2->clk2 would be enabled and after
+its usage instead of it being disabled, phy->clk2 was disabled.
+this caused phy2->clk2 to stay positive, leaking a prepare/enable reference on it and causing it to be enabled indefinitely, and also causing phy->clk2 to subtract from its
+already disabled state (0), causing a loud kernel WARN_ON stack trace, fix is obvious.
+commit: https://github.com/Roadbobek/linux__Laser_MID-786__Along_AL-Ax3-K71-RTL8703-V2.0__Allwinner-A33-sun8i/commit/13814d2077000e1f8dae3ba588bfa0113b7850d2
+
+now im gonna send this off as a pr email to linux, all the commit messages and structure and whatnot had to be changed so every thing is in a new branch:
+https://github.com/Roadbobek/linux__Laser_MID-786__Along_AL-Ax3-K71-RTL8703-V2.0__Allwinner-A33-sun8i/tree/usb-sunxi-fix-pr
+
+here is the b4 cover letter:
+
+  ──────
+  Copy of the b4 Cover Letter ([PATCH v2 0/3])
+
+    usb/phy: sunxi: Assert reset before deasserting on init
+
+    When a bootloader such as U-Boot (for example with
+    CONFIG_USB_MUSB_HOST=y) initializes USB host mode and boots Linux
+    without stopping USB first, both the MUSB controller and USB PHY
+    reset lines are already deasserted when Linux probes them.
+
+    Because reset_control_deassert() alone is a no-op on an already
+    deasserted reset line, stale hardware register state persists across
+    boot. On Allwinner A33, MUSB stays wedged in a_wait_bcon with
+    DevCtl=0x99, Power=0xf0, and a frozen Frame counter even across
+    hot-unplug and replug.
+
+    This series ensures both the MUSB controller and USB PHYs are reset
+    cleanly regardless of prior bootloader state, and fixes a related
+    PHY2 clock reference imbalance spotted during review:
+
+    - Patch 1 uses devm_reset_control_get_exclusive() and briefly asserts
+      glue->rst in sunxi_musb_init().
+    - Patch 2 uses devm_reset_control_get_exclusive() and asserts all PHY
+      resets in sun4i_usb_phy_probe() before registering the PHY provider,
+      avoiding disrupting shared PHY2 on SoCs with needs_phy2_siddq.
+    - Patch 3 fixes a pre-existing phy2->clk2 reference imbalance in
+      sun4i_usb_phy_init() on SoCs with needs_phy2_siddq.
+
+    Tested on an Allwinner A33 Q8 tablet (Laser MID-786).
+
+    To: Bin Liu <b-liu@ti.com>
+    To: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    To: Chen-Yu Tsai <wens@kernel.org>
+    To: Jernej Skrabec <jernej.skrabec@gmail.com>
+    To: Samuel Holland <samuel@sholland.org>
+    To: Philipp Zabel <p.zabel@pengutronix.de>
+    To: Vinod Koul <vkoul@kernel.org>
+    To: Neil Armstrong <neil.armstrong@linaro.org>
+    To: Manivannan Sadhasivam <mani@kernel.org>
+    Cc: linux-usb@vger.kernel.org
+    Cc: linux-arm-kernel@lists.infradead.org
+    Cc: linux-sunxi@lists.linux.dev
+    Cc: linux-kernel@vger.kernel.org
+    Cc: linux-phy@lists.infradead.org
+    Signed-off-by: Bobek Brzeczyszczykiewicz <admin@roadbobek.com>
+
+    ---
+    Changes in v2:
+    - Use devm_reset_control_get_exclusive() in both sunxi_musb_probe() and
+      sun4i_usb_phy_probe() (Philipp Zabel).
+    - Move the USB PHY reset assertion from sun4i_usb_phy_init() to
+      sun4i_usb_phy_probe() so initializing PHY2 on SoCs with
+      needs_phy2_siddq does not reset an already active shared PHY2.
+    - Add Fixes tags to both reset patches.
+    - Add Patch 3 fixing the pre-existing phy2->clk2 clock reference
+      imbalance in sun4i_usb_phy_init().
+    - Link to v1: https://patch.msgid.link/20261117-usb-sunxi-reset-fix-v1-0-c2b76e0e84e1@roadbobek.com
+  ──────
+  Copies of the 3 Patch Commit Messages ([PATCH v2 1/3] – [PATCH v2 3/3])
+
+  [PATCH v2 1/3] (93ffdd67b7b2)
+    usb: musb: sunxi: Assert reset before deasserting on init
+
+    When a bootloader such as U-Boot (for example with
+    CONFIG_USB_MUSB_HOST=y) initializes MUSB and boots Linux without
+    stopping USB first, the controller reset line is already deasserted at
+    probe time.
+
+    In that case reset_control_deassert() in sunxi_musb_init() is a no-op
+    and stale MUSB register state persists across boot. On Allwinner A33,
+    MUSB stays wedged in a_wait_bcon with DevCtl=0x99, Power=0xf0, and a
+    frozen Frame counter even across hot-unplug and replug.
+
+    Request exclusive reset control via devm_reset_control_get_exclusive()
+    and assert glue->rst briefly before deasserting it when
+    SUNXI_MUSB_FL_HAS_RESET is set so MUSB starts cleanly.
+
+    Tested on an Allwinner A33 Q8 tablet (Laser MID-786).
+
+    Fixes: 132e23775779 ("usb: musb: sunxi: Add support for musb controller in A31 SoC")
+    Signed-off-by: Bobek Brzeczyszczykiewicz <admin@roadbobek.com>
+
+  [PATCH v2 2/3] (924dce22113d)
+
+    phy: sun4i-usb: Assert PHY resets in sun4i_usb_phy_probe()
+
+    When a bootloader initializes USB before booting Linux without first
+    tearing down the controller, phy->reset may already be deasserted when
+    Linux probes the USB PHY driver.
+
+    Because reset_control_deassert() alone is a no-op on an already
+    deasserted reset line, stale USB PHY state can persist across the
+    bootloader-to-kernel handoff. Asserting phy->reset inside
+    sun4i_usb_phy_init(), however, could disrupt active PHYs on SoCs with
+    needs_phy2_siddq (such as the Allwinner H616), where PHY0, PHY1, and
+    PHY3 depend on PHY2 remaining out of reset once enabled.
+
+    Request exclusive reset controls via devm_reset_control_get_exclusive()
+    and assert all PHY resets in sun4i_usb_phy_probe() before registering
+    the PHY provider so every PHY starts from a clean reset state before
+    any consumer calls sun4i_usb_phy_init().
+
+    Tested on an Allwinner A33 Q8 tablet (Laser MID-786).
+
+    Fixes: ba4bdc9e1dc0 ("PHY: sunxi: Add driver for sunxi usb phy")
+    Signed-off-by: Bobek Brzeczyszczykiewicz <admin@roadbobek.com>
+
+  [PATCH v2 3/3] (375d39618a19)
+
+    phy: sun4i-usb: Fix phy2->clk2 reference imbalance in sun4i_usb_phy_init()
+
+    In sun4i_usb_phy_init(), the needs_phy2_siddq path enables phy2->clk2
+    to access the REG_HCI_PHY_CTL PMU register for PHY2, but then disables
+    phy->clk2 instead of phy2->clk2.
+
+    This leaks a prepare/enable reference on phy2->clk2 while prematurely
+    disabling phy->clk2, causing a clock disable/unprepare underflow when
+    sun4i_usb_phy_exit() later runs.
+
+    Disable and unprepare phy2->clk2 instead of phy->clk2.
+
+    Fixes: b45c6d80325b ("phy: sun4i-usb: Introduce port2 SIDDQ quirk")
+    Signed-off-by: Bobek Brzeczyszczykiewicz <admin@roadbobek.com>
+  ──────
+
