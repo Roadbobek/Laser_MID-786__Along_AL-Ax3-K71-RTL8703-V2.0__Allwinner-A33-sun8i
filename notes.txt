@@ -487,3 +487,43 @@ here is the b4 cover letter:
     Signed-off-by: Bobek Brzeczyszczykiewicz <admin@roadbobek.com>
   ──────
 
+Converted the branch to 4 messages
+---
+To: Bin Liu <b-liu@ti.com>
+    Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+    Chen-Yu Tsai <wens@kernel.org>
+    Jernej Skrabec <jernej.skrabec@gmail.com>
+    Samuel Holland <samuel@sholland.org>
+    Philipp Zabel <p.zabel@pengutronix.de>
+    Vinod Koul <vkoul@kernel.org>
+    Neil Armstrong <neil.armstrong@linaro.org>
+    Manivannan Sadhasivam <mani@kernel.org>
+    Hans de Goede <hansg@kernel.org>
+    Felipe Balbi <balbi@ti.com>
+    Kishon Vijay Abraham I <kishon@kernel.org>
+    Maxime Ripard <mripard@kernel.org>
+    Andre Przywara <andre.przywara@arm.com>
+Cc: linux-usb@vger.kernel.org
+    linux-arm-kernel@lists.infradead.org
+    linux-sunxi@lists.linux.dev
+    linux-kernel@vger.kernel.org
+    linux-phy@lists.infradead.org
+    Bobek Brzeczyszczykiewicz <admin@roadbobek.com>
+---
+  [PATCH v2 0/3] usb/phy: sunxi: Assert reset before deasserting on init
+  [PATCH v2 1/3] usb: musb: sunxi: Assert reset before deasserting on init
+  [PATCH v2 2/3] phy: sun4i-usb: Assert PHY resets in sun4i_usb_phy_probe()
+  [PATCH v2 3/3] phy: sun4i-usb: Fix phy2->clk2 reference imbalance in sun4i_usb_phy_init()
+---
+
+---
+Bobek Brzeczyszczykiewicz (3):
+      usb: musb: sunxi: Assert reset before deasserting on init
+      phy: sun4i-usb: Assert PHY resets in sun4i_usb_phy_probe()
+      phy: sun4i-usb: Fix phy2->clk2 reference imbalance in sun4i_usb_phy_init()
+
+ drivers/phy/allwinner/phy-sun4i-usb.c | 23 +++++++++++++++++++++--
+ drivers/usb/musb/sunxi.c              |  5 ++++-
+ 2 files changed, 25 insertions(+), 3 deletions(-)
+---
+
